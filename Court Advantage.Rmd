@@ -1,0 +1,181 @@
+---
+title: "Court Advantage in NBA2K"
+author: "Jiali Li"
+date: '2022-04-28'
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+---
+
+
+
+## Introduction
+
+In the NBA2K games, a basketball simulator, the developers go out of their way to make gameplay and visuals as close to reality as possible. Not only are the character models painstakingly designed to look like their real-life counterparts, but signature moves, shot animations, and player attributes for every individual player end up requiring gigabytes of storage space. Most of this information is simply determined by the historical information of the player, with just a few gaps filled in by the game designer’s imagination. But there is one tiny attribute that I'm not fully sure I understand, and that is *Court Advantage* for teams. Every court is given a letter grade, and that letter grade impacts the gameplay of both the home and away teams, from shaking the screen during free throws to increasing shot percentages in late-game scenarios. Historically, studies have shown that the home teams do perform better. With some theories suggesting that there is additional pressure on referees to make calls in favor of the home team, and others noting that players that have to travel and play in foreign conditions are thrown off their game. For now, we'll focus on how realistic it is for home-court advantage to dramatically reduce the free throw rates of the away team. 
+
+**Note:** This is a completely unbiased point of interest and has nothing to do with my vendetta from missing every free throw as the away team in NBA2K. The jittering screen makes it near impossible to land a proper shot.
+
+
+
+### The Data
+
+The data used is sourced directly from the NBA api, making it both reliable and extremely easy to clean. I downloaded this dataset from [wyattowalsh](https://www.kaggle.com/datasets/wyattowalsh/basketball) on kaggle.com, and used only game data from the last 30 years to avoid team re-brands and re-locations.
+
+*First, I need to load all the packages I'm using.*
+```{r, message = FALSE, warning=FALSE}
+library(gghighlight)
+library(plotly)
+library(tidyverse)
+library(RSQLite)
+```
+
+*Then to load the sqlite data and create a data frame from it.*
+```{r, message = FALSE, warning=FALSE}
+con <- dbConnect(drv=SQLite(), dbname="basketball.sqlite")
+tables <- dbListTables(con)
+tables <- tables[tables != "sqlite_sequence"]
+lDataFrames <- vector("list", length=length(tables))
+
+## create a data.frame for each table
+for (i in seq(along=tables)) {
+  lDataFrames[[i]] <- dbGetQuery(conn=con, statement=paste("SELECT * FROM '", tables[[i]], "'", sep=""))
+}
+
+## isolate columns of specific data set
+games <- lDataFrames[[3]]
+games <- games[ , c("TEAM_ABBREVIATION_HOME", "TEAM_ABBREVIATION_AWAY", "SEASON_ID", "FT_PCT_HOME", "FT_PCT_AWAY")]   
+```
+*I filtered the data set according to what I specified above. The SEASON_ID is the year with a "2" in the front. So to create an initial filter for 1980 and later, I formatted the column as an integer, and then filtered out numbers lower that 21979.*
+```{r, message = FALSE, warning=FALSE}
+games <- games %>%
+  mutate(SEASON_ID = as.integer(SEASON_ID)) %>%
+  filter(SEASON_ID > 21979)
+```
+
+### Iteratiting through different Visualizations
+
+#### Graph #1: FT percentage of every single game
+From the outset, I imagined a graph with the x-axis showing the different teams, and the y-axis showing free throw percentages. Every point would show a single game, and the color would represent whether it was the home or away
+team, and we would see clusters of home games with higher free throw rates than the cluster of away games. Here's how that turned out. 
+```{r, message = FALSE, warning=FALSE}
+games_plot <- ggplot(games) +
+  geom_point(aes(x = TEAM_ABBREVIATION_HOME, y = FT_PCT_HOME, colour = "Home"), alpha = .1) +
+  geom_point(aes(x = TEAM_ABBREVIATION_AWAY, y = FT_PCT_AWAY, colour = "Away"), alpha = .1) +
+  theme_gray() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(y = "FT Percentage", x = "Court", title = "Court Advantage by Free Throw Percentage", color = "Team")
+
+games_plot
+```
+Okay, so I was being optimistic in what I thought would happen. The sheer number of games blended everything together, and the layering of the graph made it impossible to see most of the home games.
+
+#### Graph #2: FT percentage of every team by season
+Next, I'll try limiting the number of data points by grouping these into seasons. Hopefully that will give me more meaningful information than my first attempt.
+```{r, message = FALSE, warning=FALSE}
+### Grouping by home court and season
+games_by_season <- games %>%
+  group_by(TEAM_ABBREVIATION_HOME, SEASON_ID) %>%
+  summarise(AVG_FT_PCT_HOME = mean(FT_PCT_HOME),
+            AVG_FT_PCT_AWAY = mean(FT_PCT_AWAY),
+            ABS_DIFF = abs(AVG_FT_PCT_AWAY - AVG_FT_PCT_HOME))
+
+### plot 2: FT percentage by team/season, showing home and away
+games_plot_season <- ggplot(games_by_season) +
+  geom_point(aes(x = TEAM_ABBREVIATION_HOME, y = AVG_FT_PCT_AWAY, color = "Away"), alpha = .2) +
+  geom_point(aes(x = TEAM_ABBREVIATION_HOME, y = AVG_FT_PCT_HOME, color = "Home"), alpha = .2) +
+  theme_gray() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(y = "FT Percentage", x = "Court", title = "Court Advantage by Free Throw Percentage, Grouped by Season", color = "Team")
+
+games_plot_season
+```
+
+Much cleaner in comparison, but still shows no correlation between home court and free throw percentages. I notice that Home teams have a much higher variance than the away teams, and that's exactly where I made my mistake. I'm comparing a single team's free throw percentage to the totality of every team in the NBA, which doesn't make much sense. Instead, I should be comparing the courts impact to the away team's free throw performance.
+
+
+#### Graph #3: Away Team % difference by home court
+
+Lucky attempt number three. For this one, I can disregard the home team's free throw percentage, and only check how the away team does compared to their average. Since I won't distinguish by season this time, I'll filter my data even more to only include only the last few years. 
+
+*First, filter all the data, and calculate averages for each team.*
+```{r, message = FALSE, warning=FALSE}
+### filter last decade, group by match ups, calculate average FT%
+games_2010 <- filter(games, SEASON_ID>22009)
+
+games_by_away <- games_2010 %>%
+  group_by(TEAM_ABBREVIATION_HOME, TEAM_ABBREVIATION_AWAY) %>%
+  summarise(AVG_FT_PCT_AWAY = mean(FT_PCT_AWAY))
+
+### filter last decade, group by away teams's average FT%
+team_avg_at_home <- games_2010 %>%
+  group_by(TEAM_ABBR = TEAM_ABBREVIATION_HOME) %>%
+  summarise(TEAM_AVG_HOME = mean(FT_PCT_HOME))
+
+team_avg_away <- games_2010 %>%
+  group_by(TEAM_ABBR = TEAM_ABBREVIATION_AWAY) %>%
+  summarise(TEAM_AVG_AWAY = mean(FT_PCT_AWAY))
+
+team_avg <- merge(team_avg_at_home, team_avg_away, by="TEAM_ABBR", all.x = TRUE)
+team_avg$TEAM_ABBREVIATION_AWAY <- team_avg$TEAM_ABBR
+team_avg$TEAM_AVG <- with(team_avg, (TEAM_AVG_HOME + TEAM_AVG_AWAY)/2 )
+
+
+### calculate difference in average performance.
+ft_diff_by_court <- merge(games_by_away, team_avg, by="TEAM_ABBREVIATION_AWAY", all.x = TRUE)
+ft_diff_by_court$FT_DIFF <- with(ft_diff_by_court, AVG_FT_PCT_AWAY - TEAM_AVG)
+ft_diff_agg <- ft_diff_by_court %>%
+  group_by(TEAM_ABBREVIATION_HOME) %>%
+  summarise(AVG_DIFF = mean(FT_DIFF))
+```
+*I think I did more steps than necessary for the few calculations I did, and maybe I could've combined some of those dataframes into one, but it works. Moving on.*
+
+*Next, create some highlights for the values that exceed +/-1.2%, the graphing it with those highlighted points.*
+```{r, message = FALSE, warning=FALSE, fig.width=10 , fig.height=8}
+highlight_df1 <- ft_diff_agg %>% 
+  filter(AVG_DIFF<=-.012)
+highlight_df2 <- ft_diff_agg %>% 
+  filter(AVG_DIFF>=.012)
+
+### plot 3: Away team free throw performance
+
+games_plot_away_perf <- ggplot() +
+  geom_point(data = ft_diff_by_court, 
+             aes(x = TEAM_ABBREVIATION_HOME, y = FT_DIFF, color = "teams"), 
+             alpha = .1,
+             size = 3, 
+             show.legend = FALSE) +
+  geom_point(data = ft_diff_agg, 
+             aes(x = TEAM_ABBREVIATION_HOME, y = AVG_DIFF, color = "away"),
+             size = 3, 
+             show.legend = FALSE) +
+  geom_point(data=highlight_df1,
+             aes(x=TEAM_ABBREVIATION_HOME,y=AVG_DIFF),
+             color = "black",
+             fill="orange",
+             shape = 22,
+             size = 4) +
+  geom_point(data=highlight_df2,
+             aes(x=TEAM_ABBREVIATION_HOME,y=AVG_DIFF),
+             color = "black",
+             fill="orange",
+             shape = 22,
+             size = 4) +
+    geom_text(data=subset(ft_diff_by_court, abs(FT_DIFF) > .09),
+            aes(x = TEAM_ABBREVIATION_HOME, y = FT_DIFF,label=TEAM_ABBREVIATION_AWAY),
+            size = 2) + 
+  coord_cartesian(ylim=c(-.12,.12)) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_gray() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(y = "Away Team FT% +/-", x = "Home Court", title = "Away Team Free Throw Performance in +/- %")
+
+games_plot_away_perf
+```
+
+So after a bunch of filtering and calculations, we have a decent looking graph here. It's surprising to see teams like the Detroit Pistons **(DET)** and New Orleans Pelicans **(NOP)** have away teams actually shoot free throws at a higher percentage than normal. Although, unsurprising, the team with the largest fan base, the LA Lakers **(LAL)**, is where away teams perform their worst.
+
+
+
+### Conclusions
+
+I was expecting a much larger impact on free throw rates, especially when My analysis was supposed to include a comparison between my results and the home court advantage found in-game. However, I realized that the ratings in-game change based on which two teams are competing, and also vary depending on the team's current record. So without definitive data to compare to, I'll stop here. The last graph stands on it's own, showing that a crowd's jeers and boos have very little correlation to the away team's free throw rates. Even at it's very best, with an average of 22 free throw attempts per team, over a 41 game season *(82 game total, half played at home)*, that -1.5% FT rate for the LA Lakers results in a total of 13 points over a season. Once in a blue moon, a crowd's booing might change the outcome of a game, but we should just as well respect that these athletes hardly drop in free throw percentage in their away games, even with the pressure of the crowd against them. 
